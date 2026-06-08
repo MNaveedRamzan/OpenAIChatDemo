@@ -1,0 +1,51 @@
+## Build output
+bin/
+obj/
+out/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]uild/
+[Pp]ublish/
+
+## Visual Studio cache/options
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+## Rider / VS Code
+.idea/
+.vscode/
+
+## NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+
+## Logs
+*.log
+logs/
+
+## Environment & secrets — CRITICAL
+*.env
+.env
+.env.*
+appsettings.Development.json
+appsettings.Local.json
+secrets.json
+*.key
+*.pem
+
+## OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+## Test results
+TestResults/
+*.coverage
+*.coveragexml
