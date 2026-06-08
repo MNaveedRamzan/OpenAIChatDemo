@@ -1,4 +1,5 @@
 ﻿using OpenAI.Chat;
+using System.Text;
 
 // API key environment variable se uthayein
 string apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
@@ -7,13 +8,13 @@ string apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
 // Client banayein
 ChatClient client = new(model: "gpt-4o-mini", apiKey: apiKey);
 
-// Conversation history maintain karne ke liye list
+// Conversation history
 List<ChatMessage> messages = new()
 {
     new SystemChatMessage("Aap ek helpful assistant hain jo concise jawab dete hain.")
 };
 
-Console.WriteLine("Chat shuru hai. Exit karne ke liye 'exit' likhein.\n");
+Console.WriteLine("Chat shuru hai (streaming mode). Exit karne ke liye 'exit' likhein.\n");
 
 while (true)
 {
@@ -23,27 +24,52 @@ while (true)
     if (string.IsNullOrWhiteSpace(userInput)) continue;
     if (userInput.Trim().Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
 
-    // User message add karein
+    // User message history mein add karein
     messages.Add(new UserChatMessage(userInput));
 
     try
     {
-        // API call
-        ChatCompletion completion = await client.CompleteChatAsync(messages);
+        Console.Write("\nAssistant: ");
 
-        string assistantReply = completion.Content[0].Text;
+        // Streaming API call — chunks aayenge
+        var streamingResponse = client.CompleteChatStreamingAsync(messages);
 
-        // History mein assistant ka response bhi add karein (context ke liye)
-        messages.Add(new AssistantChatMessage(assistantReply));
+        // Full response build karne ke liye (history mein store karne ke liye)
+        StringBuilder fullResponse = new();
 
-        Console.WriteLine($"\nAssistant: {assistantReply}\n");
+        // Token tracking — usage info last chunk mein aati hai
+        int inputTokens = 0;
+        int outputTokens = 0;
 
-        // Token usage dekhne ke liye (cost tracking)
-        Console.WriteLine($"[Tokens — Input: {completion.Usage.InputTokenCount}, Output: {completion.Usage.OutputTokenCount}]\n");
+        // Async iteration — har chunk pe loop chalega
+        await foreach (var update in streamingResponse)
+        {
+            // Content delta — actual text jo generate hua iss chunk mein
+            foreach (var part in update.ContentUpdate)
+            {
+                Console.Write(part.Text);          // Live print to console
+                fullResponse.Append(part.Text);    // Aggregate for history
+            }
+
+            // Usage info (typically last update mein hoti hai)
+            if (update.Usage != null)
+            {
+                inputTokens = update.Usage.InputTokenCount;
+                outputTokens = update.Usage.OutputTokenCount;
+            }
+        }
+
+        Console.WriteLine(); // Streaming ke baad newline
+
+        // History mein assistant ka complete response add karein
+        messages.Add(new AssistantChatMessage(fullResponse.ToString()));
+
+        // Token cost tracking
+        Console.WriteLine($"[Tokens — Input: {inputTokens}, Output: {outputTokens}]\n");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error: {ex.Message}\n");
+        Console.WriteLine($"\nError: {ex.Message}\n");
     }
 }
 
