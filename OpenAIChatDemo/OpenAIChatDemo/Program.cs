@@ -2,39 +2,43 @@
 using System.ClientModel;
 using System.Text;
 
+// Load API key from environment variable
 string apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
-    ?? throw new InvalidOperationException("OPENAI_API_KEY environment variable set nahi hai.");
+    ?? throw new InvalidOperationException("OPENAI_API_KEY environment variable is not set.");
 
+// Create OpenAI chat client
 ChatClient client = new(model: "gpt-4o-mini", apiKey: apiKey);
 
+// Conversation history with system prompt
 List<ChatMessage> messages = new()
 {
-    new SystemChatMessage("Aap ek helpful assistant hain jo concise jawab dete hain.")
+    new SystemChatMessage("You are a helpful assistant that provides concise answers.")
 };
 
-Console.WriteLine("Chat shuru hai (streaming + retry). Exit karne ke liye 'exit' likhein.\n");
+Console.WriteLine("Chat started (streaming + retry mode). Type 'exit' to quit.\n");
 
 while (true)
 {
-    Console.Write("Aap: ");
+    Console.Write("You: ");
     string? userInput = Console.ReadLine();
 
     if (string.IsNullOrWhiteSpace(userInput)) continue;
     if (userInput.Trim().Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
 
+    // Add user message to history
     messages.Add(new UserChatMessage(userInput));
 
     bool success = await StreamWithRetryAsync(client, messages);
 
     if (!success)
     {
-        // Failed call — last user message ko history se nikalein
-        // (warna agla call ek "ghost" user message ke saath confused ho jayega)
+        // Failed call — remove orphan user message from history
+        // (otherwise the next call gets confused by a ghost user message)
         messages.RemoveAt(messages.Count - 1);
     }
 }
 
-Console.WriteLine("Chat khatam.");
+Console.WriteLine("Chat ended.");
 
 
 // ============================================================
@@ -51,9 +55,11 @@ static async Task<bool> StreamWithRetryAsync(ChatClient client, List<ChatMessage
         {
             Console.Write("\nAssistant: ");
 
+            // Build full response for history storage
             StringBuilder fullResponse = new();
             int inputTokens = 0, outputTokens = 0;
 
+            // Streaming API call — receives response chunks
             await foreach (var update in client.CompleteChatStreamingAsync(messages))
             {
                 foreach (var part in update.ContentUpdate)
@@ -62,6 +68,7 @@ static async Task<bool> StreamWithRetryAsync(ChatClient client, List<ChatMessage
                     fullResponse.Append(part.Text);
                 }
 
+                // Token usage info arrives in the final chunk
                 if (update.Usage != null)
                 {
                     inputTokens = update.Usage.InputTokenCount;
@@ -72,39 +79,39 @@ static async Task<bool> StreamWithRetryAsync(ChatClient client, List<ChatMessage
             Console.WriteLine();
             messages.Add(new AssistantChatMessage(fullResponse.ToString()));
             Console.WriteLine($"[Tokens — Input: {inputTokens}, Output: {outputTokens}]\n");
-            return true;  // Success — retry loop se exit
+            return true;
         }
 
-        // ========= TRANSIENT errors — retry karein =========
+        // ========= TRANSIENT errors — retry with backoff =========
         catch (ClientResultException ex) when (ex.Status == 429)
         {
-            Console.WriteLine($"\n⏳ Rate limit hit. Retry {attempt}/{MaxRetries} after {delayMs}ms...");
+            Console.WriteLine($"\n⏳ Rate limit hit. Retrying {attempt}/{MaxRetries} after {delayMs}ms...");
             await Task.Delay(delayMs);
             delayMs *= 2;  // Exponential backoff: 1s → 2s → 4s
         }
         catch (ClientResultException ex) when (ex.Status >= 500)
         {
-            Console.WriteLine($"\n⚠️ Server error ({ex.Status}). Retry {attempt}/{MaxRetries} after {delayMs}ms...");
+            Console.WriteLine($"\n⚠️ Server error ({ex.Status}). Retrying {attempt}/{MaxRetries} after {delayMs}ms...");
             await Task.Delay(delayMs);
             delayMs *= 2;
         }
         catch (HttpRequestException)
         {
-            Console.WriteLine($"\n🌐 Network error. Retry {attempt}/{MaxRetries} after {delayMs}ms...");
+            Console.WriteLine($"\n🌐 Network error. Retrying {attempt}/{MaxRetries} after {delayMs}ms...");
             await Task.Delay(delayMs);
             delayMs *= 2;
         }
         catch (TaskCanceledException)
         {
-            Console.WriteLine($"\n⏱️ Timeout. Retry {attempt}/{MaxRetries} after {delayMs}ms...");
+            Console.WriteLine($"\n⏱️ Timeout. Retrying {attempt}/{MaxRetries} after {delayMs}ms...");
             await Task.Delay(delayMs);
             delayMs *= 2;
         }
 
-        // ========= PERMANENT errors — retry waste of time =========
+        // ========= PERMANENT errors — retry is pointless =========
         catch (ClientResultException ex) when (ex.Status == 401)
         {
-            Console.WriteLine("\n❌ Authentication failed. OPENAI_API_KEY check karein.");
+            Console.WriteLine("\n❌ Authentication failed. Check your OPENAI_API_KEY.");
             return false;
         }
         catch (ClientResultException ex) when (ex.Status == 400)
@@ -124,6 +131,6 @@ static async Task<bool> StreamWithRetryAsync(ChatClient client, List<ChatMessage
         }
     }
 
-    Console.WriteLine($"\n❌ Max retries ({MaxRetries}) exhausted. Request skip kar rahe hain.");
+    Console.WriteLine($"\n❌ Max retries ({MaxRetries}) exhausted. Skipping this request.");
     return false;
 }
