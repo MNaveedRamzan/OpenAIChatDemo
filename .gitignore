@@ -49,3 +49,7 @@ desktop.ini
 TestResults/
 *.coverage
 *.coveragexml
+
+## Serilog output files
+logs/
+*.log
