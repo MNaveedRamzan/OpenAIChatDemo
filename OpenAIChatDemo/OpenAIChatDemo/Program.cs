@@ -1,12 +1,9 @@
 ﻿using Microsoft.Extensions.Configuration;
 using OpenAI.Chat;
 using OpenAIChatDemo.Configuration;
+using Serilog;
 using System.ClientModel;
 using System.Text;
-
-// Load API key from environment variable
-string apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
-    ?? throw new InvalidOperationException("OPENAI_API_KEY environment variable is not set.");
 
 // Build configuration from appsettings.json
 IConfigurationRoot configuration = new ConfigurationBuilder()
@@ -14,44 +11,78 @@ IConfigurationRoot configuration = new ConfigurationBuilder()
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
     .Build();
 
-// Bind to strongly-typed settings object
-AppSettings settings = new();
-configuration.Bind(settings);
+// Configure Serilog from appsettings.json
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(configuration)
+    .CreateLogger();
 
-// Create OpenAI chat client using configured model
-ChatClient client = new(model: settings.OpenAI.Model, apiKey: apiKey);
-
-// Conversation history with configured system prompt
-List<ChatMessage> messages = new()
+try
 {
-    new SystemChatMessage(settings.OpenAI.SystemPrompt)
-};
+    Log.Information("Application starting");
 
-Console.WriteLine($"Chat started — Model: {settings.OpenAI.Model} | Type 'exit' to quit.\n");
+    // Load API key from environment variable
+    string apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+        ?? throw new InvalidOperationException("OPENAI_API_KEY environment variable is not set.");
 
-while (true)
-{
-    Console.Write("You: ");
-    string? userInput = Console.ReadLine();
+    // Bind to strongly-typed settings
+    AppSettings settings = new();
+    configuration.Bind(settings);
 
-    if (string.IsNullOrWhiteSpace(userInput)) continue;
-    if (userInput.Trim().Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
+    Log.Information("Configuration loaded. Model: {Model}, MaxRetries: {MaxRetries}",
+        settings.OpenAI.Model, settings.Retry.MaxAttempts);
 
-    messages.Add(new UserChatMessage(userInput));
+    // Create OpenAI chat client
+    ChatClient client = new(model: settings.OpenAI.Model, apiKey: apiKey);
 
-    bool success = await StreamWithRetryAsync(client, messages, settings.Retry);
-
-    if (!success)
+    // Conversation history with system prompt
+    List<ChatMessage> messages = new()
     {
-        messages.RemoveAt(messages.Count - 1);
-    }
-}
+        new SystemChatMessage(settings.OpenAI.SystemPrompt)
+    };
 
-Console.WriteLine("Chat ended.");
+    Console.WriteLine($"\nChat started — Model: {settings.OpenAI.Model} | Type 'exit' to quit.\n");
+
+    while (true)
+    {
+        Console.Write("You: ");
+        string? userInput = Console.ReadLine();
+
+        if (string.IsNullOrWhiteSpace(userInput)) continue;
+
+        if (userInput.Trim().Equals("exit", StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Information("User requested exit");
+            break;
+        }
+
+        messages.Add(new UserChatMessage(userInput));
+        Log.Debug("User message added. Total messages in context: {Count}", messages.Count);
+
+        bool success = await StreamWithRetryAsync(client, messages, settings.Retry);
+
+        if (!success)
+        {
+            messages.RemoveAt(messages.Count - 1);
+            Log.Debug("Orphan user message removed from history");
+        }
+    }
+
+    Console.WriteLine("Chat ended.");
+    Log.Information("Application shutting down normally");
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    // Ensure all logs are flushed before exit
+    Log.CloseAndFlush();
+}
 
 
 // ============================================================
-// Streaming + Retry helper (now uses injected RetrySettings)
+// Streaming + Retry helper
 // ============================================================
 static async Task<bool> StreamWithRetryAsync(
     ChatClient client,
@@ -87,31 +118,48 @@ static async Task<bool> StreamWithRetryAsync(
             Console.WriteLine();
             messages.Add(new AssistantChatMessage(fullResponse.ToString()));
             Console.WriteLine($"[Tokens — Input: {inputTokens}, Output: {outputTokens}]\n");
+
+            Log.Information(
+                "Chat completion successful. InputTokens: {InputTokens}, OutputTokens: {OutputTokens}, Attempt: {Attempt}",
+                inputTokens, outputTokens, attempt);
+
             return true;
         }
 
         // ========= TRANSIENT errors — retry with backoff =========
         catch (ClientResultException ex) when (ex.Status == 429)
         {
-            Console.WriteLine($"\n⏳ Rate limit hit. Retrying {attempt}/{retrySettings.MaxAttempts} after {delayMs}ms...");
+            Log.Warning(
+                "Rate limit hit (429). Attempt: {Attempt}/{MaxAttempts}, RetryDelay: {DelayMs}ms",
+                attempt, retrySettings.MaxAttempts, delayMs);
+            Console.WriteLine($"\n⏳ Rate limit hit. Retrying...");
             await Task.Delay(delayMs);
             delayMs *= retrySettings.BackoffMultiplier;
         }
         catch (ClientResultException ex) when (ex.Status >= 500)
         {
-            Console.WriteLine($"\n⚠️ Server error ({ex.Status}). Retrying {attempt}/{retrySettings.MaxAttempts} after {delayMs}ms...");
+            Log.Warning(
+                "Server error ({Status}). Attempt: {Attempt}/{MaxAttempts}, RetryDelay: {DelayMs}ms",
+                ex.Status, attempt, retrySettings.MaxAttempts, delayMs);
+            Console.WriteLine($"\n⚠️ Server error. Retrying...");
             await Task.Delay(delayMs);
             delayMs *= retrySettings.BackoffMultiplier;
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException ex)
         {
-            Console.WriteLine($"\n🌐 Network error. Retrying {attempt}/{retrySettings.MaxAttempts} after {delayMs}ms...");
+            Log.Warning(ex,
+                "Network error. Attempt: {Attempt}/{MaxAttempts}, RetryDelay: {DelayMs}ms",
+                attempt, retrySettings.MaxAttempts, delayMs);
+            Console.WriteLine($"\n🌐 Network error. Retrying...");
             await Task.Delay(delayMs);
             delayMs *= retrySettings.BackoffMultiplier;
         }
-        catch (TaskCanceledException)
+        catch (TaskCanceledException ex)
         {
-            Console.WriteLine($"\n⏱️ Timeout. Retrying {attempt}/{retrySettings.MaxAttempts} after {delayMs}ms...");
+            Log.Warning(ex,
+                "Request timeout. Attempt: {Attempt}/{MaxAttempts}, RetryDelay: {DelayMs}ms",
+                attempt, retrySettings.MaxAttempts, delayMs);
+            Console.WriteLine($"\n⏱️ Timeout. Retrying...");
             await Task.Delay(delayMs);
             delayMs *= retrySettings.BackoffMultiplier;
         }
@@ -119,26 +167,31 @@ static async Task<bool> StreamWithRetryAsync(
         // ========= PERMANENT errors — fail fast =========
         catch (ClientResultException ex) when (ex.Status == 401)
         {
+            Log.Error("Authentication failed (401). API key may be invalid.");
             Console.WriteLine("\n❌ Authentication failed. Check your OPENAI_API_KEY.");
             return false;
         }
         catch (ClientResultException ex) when (ex.Status == 400)
         {
+            Log.Error(ex, "Invalid request (400): {Message}", ex.Message);
             Console.WriteLine($"\n❌ Invalid request: {ex.Message}");
             return false;
         }
         catch (ClientResultException ex)
         {
+            Log.Error(ex, "API error ({Status}): {Message}", ex.Status, ex.Message);
             Console.WriteLine($"\n❌ API error ({ex.Status}): {ex.Message}");
             return false;
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "Unexpected error during chat completion");
             Console.WriteLine($"\n❌ Unexpected error: {ex.Message}");
             return false;
         }
     }
 
-    Console.WriteLine($"\n❌ Max retries ({retrySettings.MaxAttempts}) exhausted. Skipping this request.");
+    Log.Error("Max retries ({MaxAttempts}) exhausted", retrySettings.MaxAttempts);
+    Console.WriteLine($"\n❌ Max retries exhausted. Skipping this request.");
     return false;
 }
